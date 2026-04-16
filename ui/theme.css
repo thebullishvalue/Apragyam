@@ -234,7 +234,7 @@ footer {
 }
 
 .premium-header h1::after {
-    content: "प्रज्ञम";
+    content: "अप्रज्ञम";
     position: absolute;
     right: 0;
     top: 0;
