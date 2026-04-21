@@ -4,10 +4,8 @@ from datetime import datetime, timedelta
 import warnings
 import os
 from typing import List, Tuple, Dict, Any
-import time
-
 # Import circuit breaker and metrics
-from circuit_breaker import yfinance_circuit, RetryWithBackoff
+from circuit_breaker import yfinance_circuit
 from metrics import get_metrics
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -335,11 +333,16 @@ def generate_historical_data(
                 symbol_df = all_data.copy()
                 
             symbol_df.columns = [col.lower() for col in symbol_df.columns]
-            
+
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 if col in symbol_df.columns:
                     symbol_df[col] = pd.to_numeric(symbol_df[col], errors='coerce')
-            
+
+            # Volume is absent for forex/crypto/futures in some yfinance versions;
+            # fill with 0 so downstream oscillator handles it rather than crashing.
+            if 'volume' not in symbol_df.columns:
+                symbol_df['volume'] = 0.0
+
             symbol_df = symbol_df.dropna(subset=['close', 'volume'])
             symbol_df.name = ticker
             
