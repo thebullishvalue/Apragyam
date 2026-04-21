@@ -215,13 +215,15 @@ INDIA_INDEX_WIKI_MAP = {
 # NSE SESSION HELPER
 # ══════════════════════════════════════════════════════════════════════════════
 
-_NSE_HEADERS = {
+# Headers that match a real Chrome browser — NSE bot-detection checks these.
+# No Accept-Encoding: NSE sometimes returns garbled compressed content when
+# requests handles decompression automatically with this header set.
+_NSE_API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.nseindia.com/",
+    "Referer": "https://www.nseindia.com/market-data/live-equity-market",
 }
 
 
@@ -232,11 +234,13 @@ def _create_nse_session() -> requests.Session:
     NSE blocks direct API calls without a prior homepage visit that sets
     session cookies (nseappid, nsit, bm_sv etc.).  This helper visits the
     NSE homepage first, then returns a session ready for API calls.
+
+    Headers are passed per-request (not at session level) so the homepage
+    visit and API call share the same header fingerprint — matching what a
+    real browser does.
     """
     session = requests.Session()
-    session.headers.update(_NSE_HEADERS)
-    # Visit homepage to establish cookies
-    session.get("https://www.nseindia.com", timeout=10)
+    session.get("https://www.nseindia.com", headers=_NSE_API_HEADERS, timeout=10)
     return session
 
 
@@ -302,15 +306,16 @@ def get_fno_stock_list() -> Tuple[Optional[List[str]], str]:
     try:
         session = _create_nse_session()
         url = "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
-        response = session.get(url, timeout=15)
+        response = session.get(url, headers=_NSE_API_HEADERS, timeout=15)
         response.raise_for_status()
         data = response.json()
 
         if "data" in data:
+            # First entry is always the index summary row, skip it
             symbols = [
                 item["symbol"]
-                for item in data["data"]
-                if item.get("symbol") and item["symbol"] != "NIFTY 50"
+                for item in data["data"][1:]
+                if item.get("symbol") and str(item["symbol"]).strip()
             ]
             if symbols:
                 symbols_ns = [f"{s}.NS" for s in symbols]
@@ -322,7 +327,7 @@ def get_fno_stock_list() -> Tuple[Optional[List[str]], str]:
     try:
         session = _create_nse_session()
         csv_url = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
-        response = session.get(csv_url, timeout=15)
+        response = session.get(csv_url, headers=_NSE_API_HEADERS, timeout=15)
         response.raise_for_status()
         df = pd.read_csv(io.StringIO(response.text))
         # Strip whitespace from column names — NSE CSV has padded headers
@@ -437,15 +442,15 @@ def get_index_stock_list(index: str) -> Tuple[Optional[List[str]], str]:
         try:
             session = _create_nse_session()
             url = f"https://www.nseindia.com/api/equity-stockIndices?index={nse_index_key}"
-            response = session.get(url, timeout=15)
+            response = session.get(url, headers=_NSE_API_HEADERS, timeout=15)
             response.raise_for_status()
             data = response.json()
             if "data" in data:
+                # First entry is always the index summary row, skip it
                 symbols = [
                     item["symbol"]
-                    for item in data["data"]
-                    if item.get("symbol")
-                    and item["symbol"] not in ("NIFTY 50", "NIFTY BANK", index)
+                    for item in data["data"][1:]
+                    if item.get("symbol") and str(item["symbol"]).strip()
                 ]
                 if symbols:
                     symbols_ns = [f"{s}.NS" for s in symbols]
@@ -529,43 +534,56 @@ def _nse_api_index_key(index: str) -> Optional[str]:
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_us_index_stock_list(index: str) -> Tuple[Optional[List[str]], str]:
     """Fetch US index constituents from Wikipedia with hardcoded fallback for Dow Jones."""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+    _headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-        if index == "S&P 500":
+    if index == "DOW JONES":
+        return DOW_JONES_TICKERS, f"✓ Loaded {len(DOW_JONES_TICKERS)} Dow Jones components"
+
+    if index == "S&P 500":
+        try:
             url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=_headers, timeout=15)
             response.raise_for_status()
             tables = pd.read_html(io.StringIO(response.text))
-            sp500_df = tables[0]
-            symbols = sp500_df['Symbol'].tolist()
-            return symbols, f"✓ Fetched {len(symbols)} S&P 500 constituents from Wikipedia"
+            # Try each table until one has enough ticker-like symbols
+            for tbl in tables:
+                cols_lower = {str(c).lower(): c for c in tbl.columns}
+                for candidate in ("symbol", "ticker", "stock symbol"):
+                    if candidate in cols_lower:
+                        col = cols_lower[candidate]
+                        symbols = (
+                            tbl[col].dropna().astype(str)
+                            .str.strip()
+                            .str.replace(r'\W', '', regex=True)  # strip footnote markers
+                            .tolist()
+                        )
+                        symbols = [s for s in symbols if s and 1 <= len(s) <= 5 and s.isalpha()]
+                        if len(symbols) >= 400:
+                            return symbols, f"✓ Fetched {len(symbols)} S&P 500 constituents from Wikipedia"
+            return None, "Could not parse S&P 500 table from Wikipedia"
+        except Exception as e:
+            return None, f"S&P 500 Wikipedia fetch failed: {e}"
 
-        elif index == "NASDAQ 100":
+    if index == "NASDAQ 100":
+        try:
             url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=_headers, timeout=15)
             response.raise_for_status()
             tables = pd.read_html(io.StringIO(response.text))
             for tbl in tables:
-                for col_name in ("Ticker", "Symbol"):
-                    if col_name in tbl.columns:
-                        symbols = tbl[col_name].dropna().astype(str).str.strip().tolist()
-                        if len(symbols) > 50:
+                cols_lower = {str(c).lower(): c for c in tbl.columns}
+                for candidate in ("ticker", "symbol", "company"):
+                    if candidate in cols_lower:
+                        col = cols_lower[candidate]
+                        symbols = tbl[col].dropna().astype(str).str.strip().tolist()
+                        symbols = [s for s in symbols if s and 1 <= len(s) <= 5 and s.isalpha()]
+                        if len(symbols) >= 80:
                             return symbols, f"✓ Fetched {len(symbols)} NASDAQ 100 constituents from Wikipedia"
             return None, "Could not parse NASDAQ 100 table from Wikipedia"
+        except Exception as e:
+            return None, f"NASDAQ 100 Wikipedia fetch failed: {e}"
 
-        elif index == "DOW JONES":
-            return DOW_JONES_TICKERS, f"✓ Loaded {len(DOW_JONES_TICKERS)} Dow Jones components"
-
-        return None, f"Unknown US index: {index}"
-
-    except Exception as e:
-        # Dow Jones always has a fallback
-        if index == "DOW JONES":
-            return DOW_JONES_TICKERS, f"⚠ Wikipedia unavailable → Loaded {len(DOW_JONES_TICKERS)} Dow Jones components (built-in)"
-        return None, f"Error fetching {index}: {e}"
+    return None, f"Unknown US index: {index}"
 
 
 def get_commodity_list() -> Tuple[List[str], str]:
