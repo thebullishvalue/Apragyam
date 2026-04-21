@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import warnings
 import os
@@ -27,8 +28,10 @@ class LiquidityOscillator:
 
         df = data.copy()
         df['spread'] = (df['high'] + df['low']) / 2 - df['open']
-        df['vol_ma'] = df['volume'].rolling(window=self.length).mean()
-        safe_vol_ma = df['vol_ma'].replace(0, pd.NA)
+        df['vol_ma'] = df['volume'].astype(float).rolling(window=self.length).mean()
+        # Use np.nan (not pd.NA) so division produces float NaN, not object-dtype NA,
+        # which would cause rolling().mean() to crash on non-numeric dtype.
+        safe_vol_ma = df['vol_ma'].where(df['vol_ma'] != 0, np.nan)
         df['vwap_spread'] = (df['spread'] * df['volume'] / safe_vol_ma).rolling(window=self.length).mean()
         close_shifted = df['close'].shift(self.impact_window)
         df['price_impact'] = ((df['close'] - close_shifted) * df['volume'] / safe_vol_ma).rolling(window=self.length).mean()
@@ -36,8 +39,8 @@ class LiquidityOscillator:
         df['source_value'] = df['close'] + df['liquidity_score']
         df['lowest_value'] = df['source_value'].rolling(window=self.length).min()
         df['highest_value'] = df['source_value'].rolling(window=self.length).max()
-        range_value = df['highest_value'] - df['lowest_value']
-        safe_range_value = range_value.replace(0, pd.NA)
+        range_value = (df['highest_value'] - df['lowest_value']).astype(float)
+        safe_range_value = range_value.where(range_value != 0, np.nan)
         oscillator = 200 * (df['source_value'] - df['lowest_value']) / safe_range_value - 100
         return oscillator.rename('liquidity_oscillator')
 
@@ -61,7 +64,8 @@ def calculate_rsi(data: pd.DataFrame, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
 
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    safe_avg_loss = avg_loss.where(avg_loss != 0, np.nan)
+    rs = avg_gain / safe_avg_loss
     rsi = 100.0 - (100.0 / (1.0 + rs))
     rsi = rsi.fillna(100.0)  # avg_loss == 0 means all gains → RSI = 100
     return rsi

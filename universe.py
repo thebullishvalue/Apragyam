@@ -545,19 +545,19 @@ def get_us_index_stock_list(index: str) -> Tuple[Optional[List[str]], str]:
             response = requests.get(url, headers=_headers, timeout=15)
             response.raise_for_status()
             tables = pd.read_html(io.StringIO(response.text))
-            # Try each table until one has enough ticker-like symbols
             for tbl in tables:
                 cols_lower = {str(c).lower(): c for c in tbl.columns}
                 for candidate in ("symbol", "ticker", "stock symbol"):
                     if candidate in cols_lower:
                         col = cols_lower[candidate]
-                        symbols = (
-                            tbl[col].dropna().astype(str)
-                            .str.strip()
-                            .str.replace(r'\W', '', regex=True)  # strip footnote markers
-                            .tolist()
-                        )
-                        symbols = [s for s in symbols if s and 1 <= len(s) <= 5 and s.isalpha()]
+                        # Keep dots/hyphens intact — yfinance accepts BRK.B directly
+                        symbols = tbl[col].dropna().astype(str).str.strip().tolist()
+                        symbols = [
+                            s for s in symbols
+                            if s and 1 <= len(s) <= 6
+                            and s not in ('nan', 'None', 'Symbol', 'Ticker')
+                            and not s[0].isdigit()
+                        ]
                         if len(symbols) >= 400:
                             return symbols, f"✓ Fetched {len(symbols)} S&P 500 constituents from Wikipedia"
             return None, "Could not parse S&P 500 table from Wikipedia"
@@ -572,11 +572,16 @@ def get_us_index_stock_list(index: str) -> Tuple[Optional[List[str]], str]:
             tables = pd.read_html(io.StringIO(response.text))
             for tbl in tables:
                 cols_lower = {str(c).lower(): c for c in tbl.columns}
-                for candidate in ("ticker", "symbol", "company"):
+                for candidate in ("ticker", "symbol"):
                     if candidate in cols_lower:
                         col = cols_lower[candidate]
                         symbols = tbl[col].dropna().astype(str).str.strip().tolist()
-                        symbols = [s for s in symbols if s and 1 <= len(s) <= 5 and s.isalpha()]
+                        symbols = [
+                            s for s in symbols
+                            if s and 1 <= len(s) <= 6
+                            and s not in ('nan', 'None', 'Symbol', 'Ticker')
+                            and not s[0].isdigit()
+                        ]
                         if len(symbols) >= 80:
                             return symbols, f"✓ Fetched {len(symbols)} NASDAQ 100 constituents from Wikipedia"
             return None, "Could not parse NASDAQ 100 table from Wikipedia"
